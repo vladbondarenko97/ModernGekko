@@ -1,5 +1,8 @@
 [submodule "vendor/dolphin"]
 	path = vendor/dolphin
-	url = https://github.com/ExpansionPak/RecompCore.git
-	branch = moderngekko-vendor
+	url = https://github.com/vladbondarenko97/RecompCore.git
+	branch = sims2pets-ios
 	shallow = true
+[submodule "extern/touchkit"]
+	path = extern/touchkit
+	url = https://github.com/vladbondarenko97/touchkit.git

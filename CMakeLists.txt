@@ -90,6 +90,9 @@ if(MODERNGEKKO_FRONTEND_SDK)
     endif()
 endif()
 
+if(IOS)
+    add_compile_definitions(IPHONEOS=1)
+endif()
 if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     set(MODERNGEKKO_ENABLE_IMGUI_LAUNCHER ON CACHE BOOL "" FORCE)
     set(ENABLE_QT OFF CACHE BOOL "" FORCE)
@@ -105,7 +108,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     set(ENCODE_FRAMEDUMPS OFF CACHE BOOL "" FORCE)
     set(ENABLE_LLVM OFF CACHE BOOL "" FORCE)
     # Cubeb is Dolphin's only audio backend on macOS
-    if(APPLE OR WIN32)
+    if((APPLE AND NOT IOS) OR WIN32)
         set(ENABLE_CUBEB ON CACHE BOOL "" FORCE)
     else()
         set(ENABLE_CUBEB OFF CACHE BOOL "" FORCE)
@@ -255,10 +258,27 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformWin32.cpp)
         target_link_libraries(moderngekko PRIVATE dwmapi)
     endif()
-    if(APPLE)
+    if(IOS)
+        # UIKit host (CAMetalLayer + touch pad), see src/ios
+        target_sources(moderngekko PRIVATE src/ios/PlatformIOS.mm src/ios/sims_pointer.cpp src/ios/save_sync.mm)
+        set_source_files_properties(src/ios/PlatformIOS.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        # On-screen controls (iOS touch overlay), a separate reusable repo.
+        if(NOT TOUCHKIT_DIR)
+            set(TOUCHKIT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/extern/touchkit")  # submodule
+        endif()
+        add_subdirectory("${TOUCHKIT_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/touchkit")
+        target_link_libraries(moderngekko PRIVATE touchkit)
+        target_include_directories(moderngekko PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios")
+        target_compile_definitions(moderngekko PRIVATE MODERNGEKKO_HAVE_UIKIT=1)
+    elseif(APPLE)
         # Dolphin's windowed backend for macOS
         target_sources(moderngekko PRIVATE
-            vendor/dolphin/Source/Core/DolphinNoGUI/PlatformMacos.mm)
+            vendor/dolphin/Source/Core/DolphinNoGUI/PlatformMacos.mm
+            src/ios/save_sync.mm  # cloud saves, as on iOS (non-ARC)
+            src/ios/sims_pointer.cpp)  # the skip-intro mod
+        target_include_directories(moderngekko PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios")
+        target_compile_definitions(moderngekko PRIVATE MODERNGEKKO_HAVE_SAVE_SYNC=1)
         set_source_files_properties(
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformMacos.mm
             PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
@@ -396,14 +416,16 @@ else()
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin_legacy")
 endif()
 
+if(NOT IOS)
 add_executable(moderngekko-module-info
     tools/module_info.cpp
 )
 target_link_libraries(moderngekko-module-info
     PRIVATE ModernGekko::Runtime
 )
+endif()
 
-if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
+if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME AND NOT IOS)
     if(TARGET SDL3-static)
         set(_moderngekko_sdl_target SDL3-static)
     elseif(TARGET SDL3::SDL3-shared)

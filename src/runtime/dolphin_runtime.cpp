@@ -19,6 +19,9 @@
 #include "Core/State.h"
 #include "Core/System.h"
 #include "DolphinNoGUI/Platform.h"
+#ifdef MODERNGEKKO_HAVE_UIKIT
+std::unique_ptr<Platform> MGCreateIOSPlatform();  // src/ios/PlatformIOS.mm
+#endif
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
 #include "UICommon/UICommon.h"
 #include "VideoCommon/FrameDumper.h"
@@ -29,6 +32,15 @@
 #include "dolphin_runtime_internal.hpp"
 #include "moderngekko/cpu_state.h"
 #include "moderngekko/mod_loader.hpp"
+#include "Core/Config/StaticRecompSettings.h"
+#if defined(MODERNGEKKO_HAVE_SAVE_SYNC)
+#include "save_sync.h"
+#endif
+#if defined(MODERNGEKKO_HAVE_SAVE_SYNC) || defined(MODERNGEKKO_HAVE_UIKIT)
+#include "sims_pointer.h"
+#include "Common/CommonPaths.h"
+#include "Common/FileUtil.h"
+#endif
 #include "moderngekko/module_loader.hpp"
 
 #include <algorithm>
@@ -598,8 +610,19 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
       "ModernGekko - " + impl->metadata.game_name + " [" +
       impl->metadata.disc_id + "]");
   impl->mods = std::make_unique<ModManager>();
-  const ModLoadReport mod_report = impl->mods->LoadDirectories(
-      impl->config.mod_directories, impl->metadata.disc_id);
+  ModLoadReport mod_report;
+  std::vector<ModSource> mod_sources =
+      DiscoverModSources(impl->config.mod_directories, &mod_report.issues);
+#if defined(MODERNGEKKO_HAVE_SAVE_SYNC) || defined(MODERNGEKKO_HAVE_UIKIT)
+  // Skips the startup movies unless SIMS2_INTRO=1 (iOS: ⚙ Audio/Video toggle).
+  // Required with a slim disc (scripts/make_slim_disc.sh zeroes the movies).
+  if (!std::getenv("SIMS2_INTRO") || std::string_view(std::getenv("SIMS2_INTRO")) != "1")
+    impl->config.builtin_mods.push_back(sims::SkipIntroMod());  // checks the game ID itself
+#endif
+  for (const ModernGekkoModDesc *builtin : impl->config.builtin_mods)
+    mod_sources.push_back(ModSource::AttachedDescriptor(builtin, "builtin"));
+  if (mod_report.issues.empty())
+    mod_report = impl->mods->Load(mod_sources, impl->metadata.disc_id);
   for (const ModLoadIssue &issue : mod_report.issues)
     std::fprintf(stderr, "mod rejected: %s: %s\n", issue.source.c_str(),
                  issue.message.c_str());
@@ -622,6 +645,9 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
 #endif
 #ifdef MODERNGEKKO_HAVE_COCOA
   else impl->platform = Platform::CreateMacOSPlatform();
+#endif
+#ifdef MODERNGEKKO_HAVE_UIKIT
+  else impl->platform = MGCreateIOSPlatform();
 #endif
 #ifdef HAVE_X11
   else if (impl->config.window_system != WindowSystem::Wayland) impl->platform =
@@ -677,7 +703,7 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
              !std::ranges::contains(audio_backends,
                                     impl->config.audio.backend)) {
     constexpr std::array preferred_backends = {
-        BACKEND_CUBEB, BACKEND_PULSEAUDIO, BACKEND_ALSA};
+        BACKEND_CUBEB, BACKEND_AUDIOUNIT, BACKEND_PULSEAUDIO, BACKEND_ALSA};
     const auto preferred =
         std::ranges::find_if(preferred_backends, [&](const char *backend) {
           return std::ranges::contains(audio_backends, backend);
@@ -766,6 +792,11 @@ RuntimeRunResult Runtime::Run() {
           PathToString(m_impl->metadata.main_dol),
           BootSessionData(PathToString(*m_impl->config.load_state_path),
                           DeleteSavestateAfterBoot::No));
+    else if (const auto disc = m_impl->metadata.root / "disc.rvz";
+             std::filesystem::is_regular_file(disc))
+      // The compressed disc beside sys/ (370 MB smaller than files/ on iOS);
+      // sys/ stays for InspectGame, files/ may be empty.
+      boot = BootParameters::GenerateFromFile(PathToString(disc));
     else
       boot =
           BootParameters::GenerateFromFile(PathToString(m_impl->metadata.main_dol));
@@ -782,6 +813,22 @@ RuntimeRunResult Runtime::Run() {
         if (state == Core::State::Uninitialized && m_impl->platform)
           m_impl->platform->Stop();
       });
+  // Sims 2 Pets: its idle thread spins on `bl 0x8036BCE0; b .-4` (0x80318E5C),
+  // 99% of dispatches while waiting for the next frame. Idle there instead.
+  if (m_impl->metadata.disc_id == "G4OE69")
+    Config::SetBase(Config::MAIN_STATICRECOMP_IDLE_PC, 0x80318E60u);
+#if defined(MODERNGEKKO_HAVE_SAVE_SYNC)
+  // Mac: the memory card folder syncs with a save server (src/ios/save_sync.mm),
+  // login in ~/Library/Application Support/save_sync.txt.
+  // Before boot: a newer cloud save is in place before the card is read.
+  if (const char *home = std::getenv("HOME")) {
+    const std::filesystem::path support =
+        std::filesystem::path(home) / "Library/Application Support";
+    savesync::PromptLoginIfNeeded(support);  // first launch: sign in, or not
+    savesync::Start(support,
+                    std::filesystem::path(File::GetUserPath(D_GCUSER_IDX)) / "USA/Card A");
+  }
+#endif
   if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot),
                              m_impl->platform->GetWindowSystemInfo())) {
     m_impl->running = false;

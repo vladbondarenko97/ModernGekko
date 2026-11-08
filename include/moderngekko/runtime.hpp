@@ -1,6 +1,7 @@
 #pragma once
 
 #include "moderngekko/game.hpp"
+#include "moderngekko/mod_abi.h"
 #include "moderngekko/module_abi.h"
 
 #include <filesystem>
@@ -63,6 +64,8 @@ struct RuntimeConfig
   std::filesystem::path user_directory;
   ModuleSource module;
   std::vector<std::filesystem::path> mod_directories;
+  // Mods built into the host (static builds with no dlopen), loaded with those found in mod_directories.
+  std::vector<const ModernGekkoModDesc*> builtin_mods;
   GraphicsSettings graphics;
   AudioSettings audio;
   InputSettings input;
