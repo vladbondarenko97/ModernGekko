@@ -136,6 +136,8 @@ static std::vector<touchkit::HostSetting> HostSettings()
                   {{"40 ms (low latency)", 40}, {"60 ms", 60}, {"80 ms (default)", 80},
                    {"120 ms", 120}, {"160 ms (fewest crackles)", 160}},
                   2),
+      // The game draws ~30 fps while it waits for the (emulated, real-speed) disc.
+      Toggle("Game", "fastdisc", "Fast disc loading", MAIN_FAST_DISC_SPEED, true),
   };
   // Volume and mute reach the stream only through UpdateSoundStream.
   for (auto& setting : s)
