@@ -16,9 +16,12 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <thread>
 #include <unistd.h>
+#include <mach/mach.h>
+#include <mach-o/dyld.h>
 
 #include "Common/Config/Config.h"
 #include "Core/Config/StaticRecompSettings.h"
@@ -28,6 +31,7 @@
 #include "Core/Core.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/PerformanceMetrics.h"
+#include "Core/HW/Memmap.h"
 #include "Core/System.h"
 #include "DolphinNoGUI/Platform.h"
 #include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
@@ -39,6 +43,7 @@
 
 extern "C" const ModernGekkoModuleDesc* staticrecomp_get_module(void);
 void StaticRecompPerfCounters(u64* native, u64* fallback);  // StaticRecompCore.cpp
+void StaticRecompGuestRegs(u32* pc, u32* lr, u32* sp);    // StaticRecompCore.cpp
 
 static CAMetalLayer* s_layer = nil;
 
@@ -263,10 +268,24 @@ public:
     static u64 last_native = 0, last_fallback = 0;
     u64 native = 0, fallback = 0;
     StaticRecompPerfCounters(&native, &fallback);
-    std::fprintf(stderr, "[perf] fps=%.1f vps=%.1f speed=%.0f%% native=%llu interp=%llu\n",
+    // Where the game is (pc, lr, then the saved LRs up the guest stack): a
+    // hang shows its loop here.
+    u32 pc, lr, sp;
+    StaticRecompGuestRegs(&pc, &lr, &sp);
+    char where[96];
+    int n = std::snprintf(where, sizeof(where), "pc=%08x lr=%08x bt=", pc, lr);
+    auto& memory = Core::System::GetInstance().GetMemory();
+    for (int i = 0; i < 5 && sp >= 0x80000000u && sp < 0x817FFFF0u && n < 80; ++i)
+    {
+      sp = memory.Read_U32(sp & 0x01FFFFFFu);
+      if (sp < 0x80000000u || sp >= 0x817FFFF0u)
+        break;
+      n += std::snprintf(where + n, sizeof(where) - n, "%08x,", memory.Read_U32((sp + 4) & 0x01FFFFFFu));
+    }
+    std::fprintf(stderr, "[perf] fps=%.1f vps=%.1f speed=%.0f%% native=%llu interp=%llu %s\n",
                  perf.GetFPS(), perf.GetVPS(), perf.GetSpeed() * 100,
                  (unsigned long long)(native - last_native),
-                 (unsigned long long)(fallback - last_fallback));
+                 (unsigned long long)(fallback - last_fallback), where);
     last_native = native;
     last_fallback = fallback;
   }
@@ -328,6 +347,15 @@ private:
     }
     if (now >= s_a_from && now < s_a_until)
       buttons |= kA;
+    // Only write when something changed, so remote (automation) presses aren't overwritten.
+    const bool walking = now < s_walk_until && s.stick[0][0] == 0 && s.stick[0][1] == 0;
+    const float state[] = {float(buttons), s.trigger[0], s.trigger[1],
+                           walking ? s_walk_x : s.stick[0][0], walking ? s_walk_y : s.stick[0][1],
+                           s.stick[1][0], s.stick[1][1]};
+    static float s_last_state[std::size(state)] = {-1};
+    if (std::equal(std::begin(state), std::end(state), s_last_state))
+      return;
+    std::copy(std::begin(state), std::end(state), s_last_state);
     static constexpr std::pair<uint32_t, ControlID> kButtons[] = {
         {kA, GCPAD_A_BUTTON},         {kB, GCPAD_B_BUTTON},
         {kX, GCPAD_X_BUTTON},         {kY, GCPAD_Y_BUTTON},
@@ -341,13 +369,90 @@ private:
     SetControlState(0, GCPAD_R_ANALOG, s.trigger[1]);
     SetControlState(0, GCPAD_L_DIGITAL, s.trigger[0] > 0.9f ? 1.0 : 0.0);
     SetControlState(0, GCPAD_R_DIGITAL, s.trigger[1] > 0.9f ? 1.0 : 0.0);
-    const bool walking = now < s_walk_until && s.stick[0][0] == 0 && s.stick[0][1] == 0;
     SetControlState(0, GCPAD_MAIN_STICK_X, walking ? s_walk_x : s.stick[0][0]);
     SetControlState(0, GCPAD_MAIN_STICK_Y, walking ? s_walk_y : s.stick[0][1]);
     SetControlState(0, GCPAD_C_STICK_X, s.stick[1][0]);
     SetControlState(0, GCPAD_C_STICK_Y, s.stick[1][1]);
   }
 };
+
+// Sampling profiler for perf work over ssh: `touch Documents/profile_go` while playing; every
+// 1 ms it records the pc (and lr) of each running thread for 15 s into Documents/profile.txt as
+// offsets into the app binary (symbolize with atos -l 0 on the Mac), then deletes profile_go.
+// PGO builds (module compiled with -fprofile-instr-generate): `touch Documents/pgo_dump` writes
+// the counters so far to Documents/sims.profraw. Weak, and build_ipa.sh links with -U for them,
+// so normal builds (no profile runtime) see null.
+extern "C" int __llvm_profile_write_file(void) __attribute__((weak));
+extern "C" void __llvm_profile_set_filename(const char*) __attribute__((weak));
+extern "C" void __llvm_profile_reset_counters(void) __attribute__((weak));
+
+static void StartProfilerWatcher(const std::filesystem::path& root)
+{
+  std::thread([root] {
+    const auto go = root / "profile_go";
+    for (;;)
+    {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      std::error_code ec;
+      // pgo_reset: zero the counters (e.g. right after loading the benchmark state).
+      const auto reset_counters = &__llvm_profile_reset_counters;
+      const auto set_filename = &__llvm_profile_set_filename;
+      const auto write_file = &__llvm_profile_write_file;
+      if (reset_counters && std::filesystem::exists(root / "pgo_reset", ec))
+      {
+        reset_counters();
+        std::filesystem::remove(root / "pgo_reset", ec);
+      }
+      if (set_filename && write_file && std::filesystem::exists(root / "pgo_dump", ec))
+      {
+        set_filename((root / "sims.profraw").c_str());
+        write_file();
+        std::filesystem::remove(root / "pgo_dump", ec);
+      }
+      if (!std::filesystem::exists(go, ec))
+        continue;
+      const uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
+      FILE* out = std::fopen((root / "profile.tmp").c_str(), "w");
+      const thread_act_t self = mach_thread_self();
+      const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+      while (out && std::chrono::steady_clock::now() < end)
+      {
+        thread_act_array_t threads;
+        mach_msg_type_number_t count = 0;
+        if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS)
+          break;
+        for (mach_msg_type_number_t i = 0; i < count; ++i)
+        {
+          thread_basic_info_data_t info;
+          mach_msg_type_number_t n = THREAD_BASIC_INFO_COUNT;
+          if (threads[i] != self &&
+              thread_info(threads[i], THREAD_BASIC_INFO, (thread_info_t)&info, &n) == KERN_SUCCESS &&
+              info.run_state == TH_STATE_RUNNING && thread_suspend(threads[i]) == KERN_SUCCESS)
+          {
+            arm_thread_state64_t st;
+            mach_msg_type_number_t sn = ARM_THREAD_STATE64_COUNT;
+            const bool got = thread_get_state(threads[i], ARM_THREAD_STATE64, (thread_state_t)&st,
+                                              &sn) == KERN_SUCCESS;
+            // Resume before writing: the suspended thread may hold the malloc/stdio lock.
+            thread_resume(threads[i]);
+            if (got)
+              std::fprintf(out, "%u %llx %llx\n", threads[i],
+                           (unsigned long long)(arm_thread_state64_get_pc(st) - slide),
+                           (unsigned long long)(arm_thread_state64_get_lr(st) - slide));
+          }
+          mach_port_deallocate(mach_task_self(), threads[i]);
+        }
+        vm_deallocate(mach_task_self(), (vm_address_t)threads, count * sizeof(thread_act_t));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      mach_port_deallocate(mach_task_self(), self);
+      if (out)
+        std::fclose(out);
+      std::filesystem::rename(root / "profile.tmp", root / "profile.txt", ec);
+      std::filesystem::remove(go, ec);
+    }
+  }).detach();
+}
 
 void RunGame()
 {
@@ -360,6 +465,19 @@ void RunGame()
 
   // Cloud saves: newer saves come down before the game reads its memory card.
   savesync::Start(root, root / "User/GC/USA/Card A");
+  StartProfilerWatcher(root);
+  // Diagnostics over ssh: Documents/env.txt, one KEY=VALUE per line, set before the runtime starts.
+  if (FILE* env = std::fopen((root / "env.txt").c_str(), "r")) {
+    char line[512];
+    while (std::fgets(line, sizeof line, env)) {
+      line[std::strcspn(line, "\r\n")] = 0;
+      if (char* eq = std::strchr(line, '='); eq && eq != line) {
+        *eq = 0;
+        setenv(line, eq + 1, 1);
+      }
+    }
+    std::fclose(env);
+  }
 
   moderngekko::RuntimeConfig config;
   // The game: Documents/game (copied in with Finder/Files, or pushed), else
@@ -373,6 +491,9 @@ void RunGame()
   if ([NSUserDefaults.standardUserDefaults integerForKey:@"sims2.touch.setting.intro"] == 1)
     setenv("SIMS2_INTRO", "1", 1);
   config.mod_directories.push_back(root / "Mods");
+  // Remote testing over ssh: create Documents/automation to accept the runner's command files.
+  if (std::error_code ec; std::filesystem::is_directory(root / "automation", ec))
+    config.automation.directory = root / "automation";
   config.graphics.backend = "Metal";
   config.fullscreen = true;
   config.show_fps_in_title = true;  // SetTitle above logs perf
@@ -413,6 +534,28 @@ std::unique_ptr<Platform> MGCreateIOSPlatform()
   [AVAudioSession.sharedInstance setCategory:AVAudioSessionCategoryPlayback error:nil];
   [AVAudioSession.sharedInstance setActive:YES error:nil];
   touchkit::Attach((__bridge void*)vc.view, MakeTouchConfig());
+  // Which build is installed: a few seconds at launch (stamp from build_ipa.sh).
+  if (NSString* stamp = [NSBundle.mainBundle objectForInfoDictionaryKey:@"MGBuildStamp"])
+  {
+    UILabel* label = [UILabel new];
+    label.text = [@"  Build " stringByAppendingFormat:@"%@  ", stamp];
+    label.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightMedium];
+    label.textColor = UIColor.whiteColor;
+    label.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+    label.layer.cornerRadius = 8;
+    label.layer.masksToBounds = YES;
+    [label sizeToFit];
+    CGRect f = label.frame;
+    f.size.height += 8;
+    f.origin = CGPointMake((self.window.bounds.size.width - f.size.width) / 2,
+                           self.window.safeAreaInsets.top + 12);
+    label.frame = f;
+    label.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
+    [self.window addSubview:label];
+    [UIView animateWithDuration:1.0 delay:6.0 options:0
+                     animations:^{ label.alpha = 0; }
+                     completion:^(BOOL) { [label removeFromSuperview]; }];
+  }
   // The layer has its size once laid out; the runtime starts after that.
   dispatch_async(dispatch_get_main_queue(), ^{
     std::thread([] { RunGame(); }).detach();

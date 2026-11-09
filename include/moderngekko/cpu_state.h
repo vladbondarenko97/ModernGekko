@@ -87,6 +87,18 @@ struct CPUState
     PPCSPRRead spr_read;
     PPCSPRWrite spr_write;
     PPCCacheControl cache_control;
+    /* Software TLB for page-table-mapped pages; must match GXRuntime/include/core/cpu.h. */
+    struct GXVTlbEntry* vtlb;
+    uint32_t vtlb_epoch;
+    /* Gather pipe (0xCC008000) fast path: Dolphin's PowerPCState gather_pipe_ptr/base_ptr. */
+    uint8_t** gp_ptr;
+    uint8_t** gp_base;
+    /* Cross-chunk call check cache: one byte per 16 KiB chunk slot from native_base, set by the
+     * runtime once a chunk may be entered natively (verified, no mod hook), cleared on any change. */
+    const uint8_t* native_ok;
+    uint32_t native_base;
+    uint32_t native_slots;
+    uint32_t native_idle_pc;
 };
 
 #ifdef __cplusplus

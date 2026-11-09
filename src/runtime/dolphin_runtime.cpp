@@ -684,6 +684,9 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   impl->platform->SetTitle(impl->title);
 
   Config::SetBase(Config::MAIN_CPU_CORE, SelectCPUCore());
+  // Dual core: GPU command processing on its own thread instead of the CPU thread
+  // (Dolphin only defaults to it on Android). MODERNGEKKO_SINGLE_CORE=1 turns it off.
+  Config::SetBase(Config::MAIN_CPU_THREAD, std::getenv("MODERNGEKKO_SINGLE_CORE") == nullptr);
   if (!impl->config.graphics.backend.empty())
     Config::SetBase(Config::MAIN_GFX_BACKEND, impl->config.graphics.backend);
   else if (impl->config.headless)
@@ -695,6 +698,9 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
                   ShaderCompilationMode::AsynchronousUberShaders);
   Config::SetBase(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING, true);
+  // Benchmarks: uncapped speed so fps reflects raw throughput.
+  if (std::getenv("MODERNGEKKO_UNLIMITED"))
+    Config::SetBase(Config::MAIN_EMULATION_SPEED, 0.0f);
   const std::vector<std::string> audio_backends =
       AudioCommon::GetSoundBackends();
   if (impl->config.headless) {
