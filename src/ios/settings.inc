@@ -55,27 +55,6 @@ static touchkit::HostSetting Preset()
   return s;
 }
 
-// Emulated CPU clock. In lots the game keeps the Gekko busy every frame, more
-// than the iPad's CPU can run in real time (the whole game slowed to ~40%,
-// sound too). Under 100% the game gets fewer cycles per frame instead: time,
-// sound and the sims keep normal speed, fewer frames are drawn.
-static touchkit::HostSetting CpuClock()
-{
-  touchkit::HostSetting s;
-  s.section = "Video";
-  s.key = "cpuclock";
-  s.title = "Emulated CPU speed";
-  s.options = {"100% (stock)", "85%", "70%", "60%", "50%"};
-  s.defaultIndex = 0;
-  s.apply = [](int i) {
-    static constexpr float kClock[] = {1.0f, 0.85f, 0.7f, 0.6f, 0.5f};
-    const float clock = kClock[std::clamp(i, 0, 4)];
-    Config::SetBaseOrCurrent(Config::MAIN_OVERCLOCK, clock);
-    Config::SetBaseOrCurrent(Config::MAIN_OVERCLOCK_ENABLE, clock != 1.0f);
-  };
-  return s;
-}
-
 // Read at launch by RunGame (PlatformIOS.mm): nothing to apply live.
 static touchkit::HostSetting IntroMovies()
 {
@@ -93,7 +72,6 @@ static std::vector<touchkit::HostSetting> HostSettings()
   using namespace Config;
   std::vector<touchkit::HostSetting> s = {
       Preset(),
-      CpuClock(),
       IntroMovies(),
       Choice<int>("Video", "efb_scale", "Internal resolution", GFX_EFB_SCALE,
                   {{"Native (640x528)", 1}, {"2x (1280x1056)", 2}, {"3x (1920x1584)", 3},
