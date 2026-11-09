@@ -282,8 +282,10 @@ public:
         break;
       n += std::snprintf(where + n, sizeof(where) - n, "%08x,", memory.Read_U32((sp + 4) & 0x01FFFFFFu));
     }
-    std::fprintf(stderr, "[perf] fps=%.1f vps=%.1f speed=%.0f%% native=%llu interp=%llu %s\n",
+    // thermal: 0 nominal, 1 fair, 2 serious, 3 critical (iOS throttles the CPU from 2 on).
+    std::fprintf(stderr, "[perf] fps=%.1f vps=%.1f speed=%.0f%% thermal=%d native=%llu interp=%llu %s\n",
                  perf.GetFPS(), perf.GetVPS(), perf.GetSpeed() * 100,
+                 (int)[[NSProcessInfo processInfo] thermalState],
                  (unsigned long long)(native - last_native),
                  (unsigned long long)(fallback - last_fallback), where);
     last_native = native;

@@ -32,7 +32,9 @@ typedef void (*ModernGekkoModFunction)(CPUState* state);
 typedef enum ModernGekkoModPatchFlags
 {
     MODERNGEKKO_MOD_PATCH_NONE = 0,
-    MODERNGEKKO_MOD_PATCH_FORCE = 1
+    MODERNGEKKO_MOD_PATCH_FORCE = 1,
+    /* Removed after it runs once (boot-time patches): its code goes back to native speed. */
+    MODERNGEKKO_MOD_PATCH_ONCE = 2
 } ModernGekkoModPatchFlags;
 
 typedef enum ModernGekkoModHookKind

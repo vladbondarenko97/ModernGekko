@@ -4,6 +4,8 @@
 #include "Common/DynamicLibrary.h"
 #endif
 
+void StaticRecompHostCallsChanged();  // StaticRecompCore.cpp
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -126,6 +128,7 @@ struct ModManager::Impl {
   std::unordered_map<std::string, Mod *> mods_by_id;
   std::unordered_map<std::string, ModernGekkoModFunction> exports;
   std::unordered_map<std::uint32_t, ModernGekkoModFunction> patches;
+  std::unordered_set<std::uint32_t> once_patches;
   std::unordered_map<std::uint32_t, Hooks> hooks;
   std::unordered_map<std::string, std::vector<ModernGekkoModFunction>>
       callbacks;
@@ -404,7 +407,7 @@ ModLoadReport ModManager::Load(const std::vector<ModSource> &sources,
     for (std::uint32_t i = 0; i < desc->num_patches; ++i) {
       const auto &patch = desc->patches[i];
       if ((patch.address & 3u) != 0u || !patch.function ||
-          (patch.flags & ~MODERNGEKKO_MOD_PATCH_FORCE) != 0u) {
+          (patch.flags & ~(MODERNGEKKO_MOD_PATCH_FORCE | MODERNGEKKO_MOD_PATCH_ONCE)) != 0u) {
         issue(mod->source, "invalid patch");
         continue;
       }
@@ -416,6 +419,8 @@ ModLoadReport ModManager::Load(const std::vector<ModSource> &sources,
         continue;
       }
       m_impl->patches[patch.address] = patch.function;
+      if (patch.flags & MODERNGEKKO_MOD_PATCH_ONCE)
+        m_impl->once_patches.insert(patch.address);
       m_impl->Mark(patch.address);
     }
     for (std::uint32_t i = 0; i < desc->num_hooks; ++i) {
@@ -611,6 +616,11 @@ bool ModManager::Dispatch(CPUState *state, std::uint32_t address) {
   if (patch == m_impl->patches.end())
     return false;
   patch->second(state);
+  if (m_impl->once_patches.erase(address)) {
+    m_impl->patches.erase(address);
+    ++m_impl->interception_generation;
+    StaticRecompHostCallsChanged();
+  }
   return true;
 }
 

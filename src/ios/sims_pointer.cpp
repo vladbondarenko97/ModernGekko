@@ -118,7 +118,7 @@ void SkipStartupMovies(CPUState* state)
   state->pc = 0x802084C0;  // past the three stores
 }
 
-const ModernGekkoModPatch kPatches[] = {{0x80208490, SkipStartupMovies, 0}};
+const ModernGekkoModPatch kPatches[] = {{0x80208490, SkipStartupMovies, MODERNGEKKO_MOD_PATCH_ONCE}};
 const ModernGekkoModDesc kSkipIntro = {
     MODERNGEKKO_MOD_ABI_VERSION, MODERNGEKKO_CPU_ABI_VERSION, sizeof(CPUState), "G4OE69",
     "sims2pets.skip-intro", "1.0.0", "Skip the startup movies",
